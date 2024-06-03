@@ -16,3 +16,14 @@ $$
     encodings = encodings.unsqueeze(1).requires_grad_(False)
     return encodings
 ```
+
+
+
+```shell
+I could pick my lance to
+That the shall be this souls of the storment,
+And therefore the selfs and the stand of the state,
+And the shall be the sent the sent of the state,
+And the stribung to the straight of the strange of the sea
+child to me this so the seal the stand of the s
+```

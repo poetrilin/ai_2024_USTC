@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List
+from dataset import Tokenizer
 
 
 class HeadAttention(nn.Module):
@@ -287,7 +288,41 @@ class SparseMoETransformer(nn.Module):
             loss = F.cross_entropy(logits, labels)
         return logits, loss
 
-    def generate(self, inputs, max_new_tokens, tokenizer):
+    def top_k_sampling(logits: torch.Tensor, k: int) -> int:
+        """
+        Apply Top-k sampling to select the next token.
+
+        Args:
+            logits (torch.Tensor): Logits of the model's output.
+            k (int): Number of top tokens to consider for sampling.
+
+        Returns:
+            int: The index of the sampled token.
+        """
+        values, indices = torch.topk(logits, k)
+        distribution = torch.softmax(values, dim=-1)
+        sampled_index = torch.multinomial(distribution, 1).item()
+        return indices[sampled_index].item()
+
+    def generate(
+        self,
+        inputs: str,
+        max_new_tokens: int,
+        tokenizer: Tokenizer,
+        k: int = 5
+    ) -> str:
+        """
+        Generate text using a Top-k sampling strategy.
+
+        Args:
+            inputs (str): The input text to the model.
+            max_new_tokens (int): The maximum number of new tokens to generate.
+            tokenizer: Tokenizer): The tokenizer used to encode and decode text.
+            k (int): Number of top tokens to consider for sampling (default is 5).
+
+        Returns:s
+            str: The generated text.
+        """
         inputs = tokenizer.encode(inputs).clone().detach().unsqueeze(0)
         device = next(self.parameters()).device
         inputs = inputs.to(device)

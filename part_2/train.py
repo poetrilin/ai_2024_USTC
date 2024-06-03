@@ -62,7 +62,7 @@ def run(model, train_dataloader, valid_dataloader, device, epochs=10):
 if __name__ == '__main__':
     print(f"device: {device}")
     BATCH_SIZE = 128
-    EPOCHS = 15
+    EPOCHS = 10
     token_path = 'input.txt'
     tokenizer = Tokenizer(dataPath=token_path)
     SEQ_LEN = 256
