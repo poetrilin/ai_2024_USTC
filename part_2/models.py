@@ -1,351 +1,132 @@
-"""
-refer to https://github.com/kyegomez/SwitchTransformers/blob/main/switch_transformers/model.py
-"""
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor, nn
-# from zeta.nn import FeedForward, MultiQueryAttention
+from PosEncoding import AddPositionEncoding
 
 
-class SwitchGate(nn.Module):
-    """
-    SwitchGate module for MoE (Mixture of Experts) model.
+class SparseMoETransformer(nn.Module):
+    ''' 
+    Transformer decoder, consist of 
+    token embedding layer and position_embedding(position_embedding 可以理解为对位置编码，感兴趣的同学可以查阅原文，这里可以看为vocab_len = seq_len的Embedding)
+    a stack of Transformer basic block
+    a layernorm and output linear layer
+    '''
 
-    Args:
-        dim (int): Input dimension.
-        num_experts (int): Number of experts.
-        capacity_factor (float, optional): Capacity factor for sparsity. Defaults to 1.0.
-        *args: Variable length argument list.
-        **kwargs: Arbitrary keyword arguments.
-    """
-
-    def __init__(
-        self,
-        dim,
-        num_experts: int,
-        capacity_factor: float = 1.0,
-        epsilon: float = 1e-6,
-        *args,
-        **kwargs,
-    ):
+    def __init__(self,
+                 vocab_size: int, seq_len: int,
+                 embed_size: int,
+                 n_layers: int,
+                 n_heads: int,
+                 num_experts: int, active_experts: int,
+                 verbose: bool = False):
+        # vocab_size is the number of word in vocabulary dict
+        # seq_len is the sequence length/sentence length
+        # embed_size is the embedding vector dimension
         super().__init__()
-        self.dim = dim
-        self.num_experts = num_experts
-        self.capacity_factor = capacity_factor
-        self.epsilon = epsilon
-        self.w_gate = nn.Linear(dim, num_experts)
-
-    def forward(self, x: Tensor, use_aux_loss=False):
-        """
-        Forward pass of the SwitchGate module.
-
-        Args:
-            x (Tensor): Input tensor.
-
-        Returns:
-            Tensor: Gate scores.
-        """
-        # Compute gate scores
-        gate_scores = F.softmax(self.w_gate(x), dim=-1)
-
-        # Determine the top-1 expert for each token
-        capacity = int(self.capacity_factor * x.size(0))
-
-        top_k_scores, top_k_indices = gate_scores.topk(1, dim=-1)
-
-        # Mask to enforce sparsity
-        mask = torch.zeros_like(gate_scores).scatter_(
-            1, top_k_indices, 1
-        )
-
-        # Combine gating scores with the mask
-        masked_gate_scores = gate_scores * mask
-
-        # Denominators
-        denominators = (
-            masked_gate_scores.sum(0, keepdim=True) + self.epsilon
-        )
-
-        # Norm gate scores to sum to the capacity
-        gate_scores = (masked_gate_scores / denominators) * capacity
-
-        if use_aux_loss:
-            load = gate_scores.sum(0)  # Sum over all examples
-            importance = gate_scores.sum(1)  # Sum over all experts
-
-            # Aux loss is mean suqared difference between load and importance
-            loss = ((load - importance) ** 2).mean()
-
-            return gate_scores, loss
-
-        return gate_scores, None
-
-
-class SwitchMoE(nn.Module):
-    """
-    A module that implements the Switched Mixture of Experts (MoE) architecture.
-
-    Args:
-        dim (int): The input dimension.
-        hidden_dim (int): The hidden dimension of the feedforward network.
-        output_dim (int): The output dimension.
-        num_experts (int): The number of experts in the MoE.
-        capacity_factor (float, optional): The capacity factor that controls the capacity of the MoE. Defaults to 1.0.
-        mult (int, optional): The multiplier for the hidden dimension of the feedforward network. Defaults to 4.
-        *args: Variable length argument list.
-        **kwargs: Arbitrary keyword arguments.
-
-    Attributes:
-        dim (int): The input dimension.
-        hidden_dim (int): The hidden dimension of the feedforward network.
-        output_dim (int): The output dimension.
-        num_experts (int): The number of experts in the MoE.
-        capacity_factor (float): The capacity factor that controls the capacity of the MoE.
-        mult (int): The multiplier for the hidden dimension of the feedforward network.
-        experts (nn.ModuleList): The list of feedforward networks representing the experts.
-        gate (SwitchGate): The switch gate module.
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-        output_dim: int,
-        num_experts: int,
-        capacity_factor: float = 1.0,
-        mult: int = 4,
-        use_aux_loss: bool = False,
-        *args,
-        **kwargs,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.num_experts = num_experts
-        self.capacity_factor = capacity_factor
-        self.mult = mult
-        self.use_aux_loss = use_aux_loss
-
-        self.experts = nn.ModuleList(
-            [
-                FeedForward(dim, dim, mult, *args, **kwargs)
-                for _ in range(num_experts)
-            ]
-        )
-
-        self.gate = SwitchGate(
-            dim,
-            num_experts,
-            capacity_factor,
-        )
-
-    def forward(self, x: Tensor):
-        """
-        Forward pass of the SwitchMoE module.
-
-        Args:
-            x (Tensor): The input tensor.
-
-        Returns:
-            Tensor: The output tensor of the MoE.
-
-        """
-        # (batch_size, seq_len, num_experts)
-        gate_scores, loss = self.gate(
-            x, use_aux_loss=self.use_aux_loss
-        )
-
-        # Dispatch to experts
-        expert_outputs = [expert(x) for expert in self.experts]
-
-        # Check if any gate scores are nan and handle
-        if torch.isnan(gate_scores).any():
-            print("NaN in gate scores")
-            gate_scores[torch.isnan(gate_scores)] = 0
-
-        # Stack and weight outputs
-        stacked_expert_outputs = torch.stack(
-            expert_outputs, dim=-1
-        )  # (batch_size, seq_len, output_dim, num_experts)
-        if torch.isnan(stacked_expert_outputs).any():
-            stacked_expert_outputs[
-                torch.isnan(stacked_expert_outputs)
-            ] = 0
-
-        # Combine expert outputs and gating scores
-        moe_output = torch.sum(
-            gate_scores.unsqueeze(-2) * stacked_expert_outputs, dim=-1
-        )
-
-        return moe_output, loss
-
-
-class SwitchTransformerBlock(nn.Module):
-    """
-    SwitchTransformerBlock is a module that represents a single block of the Switch Transformer model.
-
-    Args:
-        dim (int): The input dimension of the block.
-        heads (int): The number of attention heads.
-        dim_head (int): The dimension of each attention head.
-        mult (int, optional): The multiplier for the hidden dimension in the feed-forward network. Defaults to 4.
-        dropout (float, optional): The dropout rate. Defaults to 0.1.
-        depth (int, optional): The number of layers in the block. Defaults to 12.
-        num_experts (int, optional): The number of experts in the SwitchMoE layer. Defaults to 6.
-        *args: Variable length argument list.
-        **kwargs: Arbitrary keyword arguments.
-
-    Attributes:
-        dim (int): The input dimension of the block.
-        heads (int): The number of attention heads.
-        dim_head (int): The dimension of each attention head.
-        mult (int): The multiplier for the hidden dimension in the feed-forward network.
-        dropout (float): The dropout rate.
-        attn_layers (nn.ModuleList): List of MultiQueryAttention layers.
-        ffn_layers (nn.ModuleList): List of SwitchMoE layers.
-
-    Examples:
-        >>> block = SwitchTransformerBlock(dim=512, heads=8, dim_head=64)
-        >>> x = torch.randn(1, 10, 512)
-        >>> out = block(x)
-        >>> out.shape
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        heads: int,
-        dim_head: int,
-        mult: int = 4,
-        dropout: float = 0.1,
-        num_experts: int = 3,
-        *args,
-        **kwargs,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.heads = heads
-        self.dim_head = dim_head
-        self.mult = mult
-        self.dropout = dropout
-
-        self.attn = MultiQueryAttention(
-            dim, heads, qk_ln=True * args, **kwargs
-        )
-
-        self.ffn = SwitchMoE(
-            dim, dim * mult, dim, num_experts, *args, **kwargs
-        )
-
-        self.add_norm = nn.LayerNorm(dim)
-
-    def forward(self, x: Tensor):
-        """
-        Forward pass of the SwitchTransformerBlock.
-
-        Args:
-            x (Tensor): The input tensor.
-
-        Returns:
-            Tensor: The output tensor.
-
-        """
-        resi = x
-        x, _, _ = self.attn(x)
-        x = x + resi
-        x = self.add_norm(x)
-        add_normed = x
-
-        ##### MoE #####
-        x, _ = self.ffn(x)
-        x = x + add_normed
-        x = self.add_norm(x)
-        return x
-
-
-class SwitchTransformer(nn.Module):
-    """
-    SwitchTransformer is a PyTorch module that implements a transformer model with switchable experts.
-
-    Args:
-        num_tokens (int): The number of tokens in the input vocabulary.
-        dim (int): The dimensionality of the token embeddings and hidden states.
-        heads (int): The number of attention heads.
-        dim_head (int, optional): The dimensionality of each attention head. Defaults to 64.
-        mult (int, optional): The multiplier for the hidden dimension in the feed-forward network. Defaults to 4.
-        dropout (float, optional): The dropout rate. Defaults to 0.1.
-        num_experts (int, optional): The number of experts in the switchable experts mechanism. Defaults to 3.
-        *args: Additional positional arguments.
-        **kwargs: Additional keyword arguments.
-    """
-
-    def __init__(
-        self,
-        num_tokens: int,
-        dim: int,
-        heads: int,
-        dim_head: int = 64,
-        mult: int = 4,
-        dropout: float = 0.1,
-        num_experts: int = 3,
-        depth: int = 4,
-        *args,
-        **kwargs,
-    ):
-        super().__init__()
-        self.num_tokens = num_tokens
-        self.dim = dim
-        self.heads = heads
-        self.dim_head = dim_head
-        self.mult = mult
-        self.dropout = dropout
-        self.num_experts = num_experts
-        self.depth = depth
-
-        self.embedding = nn.Embedding(num_tokens, dim)
-        self.layers = nn.ModuleList([])
-
-        for _ in range(depth):
-            self.layers.append(
-                SwitchTransformerBlock(
-                    dim,
-                    heads,
-                    dim_head,
-                    mult,
-                    dropout,
-                    num_experts,
-                    *args,
-                    **kwargs,
-                )
-            )
-
+        # TODO:
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.positional_encoding = AddPositionEncoding(embed_size, seq_len)
+        self.blocks = nn.ModuleList([Block(embed_size, n_heads=n_heads, seq_len=seq_len,
+                                    num_experts=num_experts, active_experts=active_experts) for _ in range(n_layers)])
+        self.attention_list = []
         self.to_out = nn.Sequential(
             nn.Softmax(dim=-1),
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_tokens),
+            nn.LayerNorm(embed_size),
+            nn.Linear(embed_size, vocab_size),
         )
+        self.seq_len = seq_len
+        self.norm = nn.LayerNorm(embed_size)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, inputs, labels=None):
+        # labels: the (ground) true output
+        # TODO: implement the forward function of the transformer
+
+        # inputs:(batch_size, seq_len, )
+        batch_size, seq_len, = inputs.shape
+        # embedding:(batch_size, seq_len, embed_size)
+        embedding = self.embedding(inputs)
+
+        # add positional encoding
+        pe_x = self.positional_encoding(embedding)
+        x = self.norm(pe_x)
+
+        self.attention_list = []
+        # attens:(batch_size, seq_len, embed_size)
+        for block in self.blocks:
+            x, attn = block(x)
+            self.attention_list.append(attn)
+        # logits:(batch_size, seq_len, vocab_size)
+        logits = self.to_out(x)
+        # compute the loss
+
+        if labels is None:
+            loss = None
+        else:
+            batch_size, seq_len, vocab_size = logits.shape
+            logits = logits.view(batch_size * seq_len, vocab_size)
+            labels = labels.view(batch_size * seq_len)
+            loss = F.cross_entropy(logits, labels)
+        return logits, loss
+
+    def get_attn_list(self):
+        return self.attention_list
+
+    def top_k_sampling(logits: torch.Tensor, k: int) -> int:
         """
-        Forward pass of the SwitchTransformer.
+        Apply Top-k sampling to select the next token.
 
         Args:
-            x (Tensor): The input tensor of shape (batch_size, sequence_length).
+            logits (torch.Tensor): Logits of the model's output.
+            k (int): Number of top tokens to consider for sampling.
 
         Returns:
-            Tensor: The output tensor of shape (batch_size, sequence_length, num_tokens).
+            int: The index of the sampled token.
         """
-        # Embed tokens through embedding layer
-        x = self.embedding(x)
+        values, indices = torch.topk(logits, k)
+        distribution = torch.softmax(values, dim=-1)
+        sampled_index = torch.multinomial(distribution, 1).item()
+        return indices[sampled_index].item()
 
-        # Pass through the transformer block with MoE, it's in modulelist
-        for layer in self.layers:
-            x = layer(x)
+    def generate(
+        self,
+        inputs: str,
+        max_new_tokens: int,
+        tokenizer: Tokenizer,
+        k: int = 5,
+        visualize: bool = False,
+    ) -> str:
+        """
+        Generate text using a Top-k sampling strategy.
 
-        # Project to output tokens
-        x = self.to_out(x)
-        return x
+        Args:
+            inputs (str): The input text to the model.
+            max_new_tokens (int): The maximum number of new tokens to generate.
+            tokenizer: Tokenizer): The tokenizer used to encode and decode text.
+            k (int): Number of top tokens to consider for sampling (default is 5).
+
+        Returns:s
+            str: The generated text.
+        """
+        inputs = tokenizer.encode(inputs).clone().detach().unsqueeze(0)
+        device = next(self.parameters()).device
+        inputs = inputs.to(device)
+        nul_char = tokenizer.encode('#')[0]
+        if inputs.size(1) > self.seq_len:
+            inputs = inputs[:, :self.seq_len]
+        elif inputs.size(1) < self.seq_len:
+            # 左边padding
+            inputs = F.pad(inputs, (self.seq_len - inputs.size(1), 0),
+                           value=nul_char)
+        generated = inputs  # shape: (batch_size=1, seq_len=21)
+        for _ in range(max_new_tokens):
+            if generated.size(1) > self.seq_len:
+                generated_input = generated[:, -self.seq_len:]
+            else:
+                generated_input = generated
+            logits, _ = self.forward(generated_input)
+            last_logits = logits[:, -1, :]
+            next_token_ids = torch.argmax(last_logits, dim=-1)
+            next_token_ids = next_token_ids.unsqueeze(-1)
+            generated = torch.cat([generated, next_token_ids], dim=1)
+        return generated

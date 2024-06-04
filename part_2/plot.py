@@ -22,4 +22,5 @@ if __name__ == '__main__':
     train_loss_list = np.load('./output/train_loss_list.npy')
     valid_loss_list = np.load('./output/valid_loss_list.npy')
     print(train_loss_list)
-    plot(train_loss_list, valid_loss_list)
+    save_path = './output/loss_plot.png'
+    plot(train_loss_list, valid_loss_list, save_path)

@@ -31,6 +31,7 @@ class HeadAttention(nn.Module):
         k = self.to_k(inputs)
         v = self.to_v(inputs)
         scale = 1 / torch.sqrt(torch.tensor(k.size(-1), dtype=torch.float32))
+        # (batch_size, seq_len, seq_len)
         attention = torch.matmul(q, k.transpose(-2, -1))*scale
 
         attention = attention.masked_fill(self.tril == 0, float('-inf'))
@@ -38,19 +39,16 @@ class HeadAttention(nn.Module):
 
         attention = self.dropout(attention)
         out = attention@v
-        return out
+        return out, attention[-1]
 
 
 class MultiHeadAttention(nn.Module):
-    # MultiHeadAttention is consist of many HeadAttention output.
-    # concat all this head attention output o_i, then merge them with a projection matrix W_o, as [o_1, o_2, ...] x W_o
-    # The reason for using multi-head attention is that we want each head to be able to extract different features
     def __init__(self, n_heads: int, head_size: int, seq_len: int, embed_size: int):
         # n_heads is the number of head attention
         # head_size is the hidden_size in each HeadAttention
         super().__init__()
         head_size = embed_size // n_heads
-        # TODO: implement heads and projection
+
         self.n_heads = n_heads
         self.head_size = head_size
         self.heads = nn.ModuleList(
@@ -59,14 +57,16 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, inputs):
         # input: (batch_size, seq_len, embed_size), make sure embed_size=n_heads x head_size
-        # return: (batch_size, seq_len, embed_size)
-        # TODO:
+        # return: (batch_size, seq_len, embed_size), attn: (seq_len, seq_len)
+
         assert inputs.size(-1) == self.n_heads * self.head_size
 
-        heads_out = [head(inputs) for head in self.heads]
+        heads_out = [head(inputs)[0] for head in self.heads]
+        # attn取最后一个head
+        attn = self.heads[-1](inputs)[1]
         out = torch.cat(heads_out, dim=-1)
         out = self.projection(out)
-        return out
+        return out, attn
 
 
 class Expert(nn.Module):
@@ -76,7 +76,7 @@ class Expert(nn.Module):
 
     def __init__(self, embed_size: int, dropout_prob: float = 0.1):
         super().__init__()
-        # TODO: init two linear layer
+
         self.layer1 = nn.Linear(embed_size, 4*embed_size)
         self.layer2 = nn.Linear(4*embed_size, embed_size)
         self.activation = nn.GELU()  # GELU  or ReLU
@@ -135,7 +135,6 @@ class TopkRouter(nn.Module):
         indices = mask
         masked_scores = scores * mask
 
-        # for 0-> -inf , softmax -> 0
         masked_scores = masked_scores.masked_fill(mask == 0, float('-inf'))
         router_output = F.softmax(masked_scores, dim=-1)
         return router_output, indices
@@ -187,7 +186,7 @@ class Block(nn.Module):
         # input: (batch_size, seq_len, embed_size)
         # TODO: forward with residual connection
         resi = inputs
-        x = self.attn(inputs)
+        x, attn = self.attn(inputs)
         x = x + resi  # add residual connection
         x = self.layer_norm(x)
         add_normed = x
@@ -196,7 +195,7 @@ class Block(nn.Module):
         x = self.moe(x)
         x = x + add_normed
         x = self.layer_norm(x)
-        return x
+        return x, attn
 
 
 def get_positional_encoding(d_model: int, seq_len: int = 5000):
@@ -241,7 +240,13 @@ class SparseMoETransformer(nn.Module):
     a layernorm and output linear layer
     '''
 
-    def __init__(self, vocab_size: int, seq_len: int, embed_size: int, n_layers: int, n_heads: int, num_experts: int, active_experts: int):
+    def __init__(self,
+                 vocab_size: int, seq_len: int,
+                 embed_size: int,
+                 n_layers: int,
+                 n_heads: int,
+                 num_experts: int, active_experts: int,
+                 verbose: bool = False):
         # vocab_size is the number of word in vocabulary dict
         # seq_len is the sequence length/sentence length
         # embed_size is the embedding vector dimension
@@ -251,6 +256,7 @@ class SparseMoETransformer(nn.Module):
         self.positional_encoding = AddPositionEncoding(embed_size, seq_len)
         self.blocks = nn.ModuleList([Block(embed_size, n_heads=n_heads, seq_len=seq_len,
                                     num_experts=num_experts, active_experts=active_experts) for _ in range(n_layers)])
+        self.attention_list = []
         self.to_out = nn.Sequential(
             nn.Softmax(dim=-1),
             nn.LayerNorm(embed_size),
@@ -272,9 +278,11 @@ class SparseMoETransformer(nn.Module):
         pe_x = self.positional_encoding(embedding)
         x = self.norm(pe_x)
 
+        self.attention_list = []
         # attens:(batch_size, seq_len, embed_size)
         for block in self.blocks:
-            x = block(x)
+            x, attn = block(x)
+            self.attention_list.append(attn)
         # logits:(batch_size, seq_len, vocab_size)
         logits = self.to_out(x)
         # compute the loss
@@ -287,6 +295,9 @@ class SparseMoETransformer(nn.Module):
             labels = labels.view(batch_size * seq_len)
             loss = F.cross_entropy(logits, labels)
         return logits, loss
+
+    def get_attn_list(self):
+        return self.attention_list
 
     def top_k_sampling(logits: torch.Tensor, k: int) -> int:
         """
@@ -309,7 +320,8 @@ class SparseMoETransformer(nn.Module):
         inputs: str,
         max_new_tokens: int,
         tokenizer: Tokenizer,
-        k: int = 5
+        k: int = 5,
+        visualize: bool = False,
     ) -> str:
         """
         Generate text using a Top-k sampling strategy.

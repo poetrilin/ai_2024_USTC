@@ -86,3 +86,5 @@ if __name__ == '__main__':
     ans = tokenizer.decode(model.generate(
         "I could pick my lance ", max_new_tokens=256, tokenizer=tokenizer)[0].tolist())
     print(ans.strip(pad_char))
+    attn_list = model.get_attn_list()
+    torch.save(attn_list, './output/attn_list.pth')
