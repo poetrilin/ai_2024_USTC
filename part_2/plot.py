@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
 
 
 def plot(train_loss_list, valid_loss_list, save_path: str = None):

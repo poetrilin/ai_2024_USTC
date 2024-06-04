@@ -3,8 +3,6 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-# import plotly.express as px
-# import plotly.graph_objects as go
 from tqdm import tqdm
 
 

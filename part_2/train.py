@@ -1,13 +1,12 @@
 import os
-from tqdm import tqdm
 
+from tqdm import tqdm
 import torch
-from torch.utils.data import DataLoader
 import torch.nn as nn
 import numpy as np
 
-from dataset import Tokenizer, ShakespeareDataset, create_dataloader
-from moe import SparseMoETransformer
+from dataset import Tokenizer, create_dataloader
+from models import SparseMoETransformer
 
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 2e-4

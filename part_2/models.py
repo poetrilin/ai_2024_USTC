@@ -2,7 +2,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from dataset import Tokenizer
 from PosEncoding import AddPositionEncoding
+from moe import Block
 
 
 class SparseMoETransformer(nn.Module):
@@ -72,29 +75,13 @@ class SparseMoETransformer(nn.Module):
     def get_attn_list(self):
         return self.attention_list
 
-    def top_k_sampling(logits: torch.Tensor, k: int) -> int:
-        """
-        Apply Top-k sampling to select the next token.
-
-        Args:
-            logits (torch.Tensor): Logits of the model's output.
-            k (int): Number of top tokens to consider for sampling.
-
-        Returns:
-            int: The index of the sampled token.
-        """
-        values, indices = torch.topk(logits, k)
-        distribution = torch.softmax(values, dim=-1)
-        sampled_index = torch.multinomial(distribution, 1).item()
-        return indices[sampled_index].item()
-
     def generate(
         self,
         inputs: str,
         max_new_tokens: int,
         tokenizer: Tokenizer,
-        k: int = 5,
-        visualize: bool = False,
+        # k: int = 5,
+
     ) -> str:
         """
         Generate text using a Top-k sampling strategy.
