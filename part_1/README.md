@@ -111,6 +111,6 @@ def update_centers(self, points:np.ndarray):
 ```
 
 ### 结果
-最终得到了一个`KMeans`的聚类器，对`Words`进行了聚类，如下图所示:
-![](PCA_KMeans.png)
+
+不同的核函数结果见目录
     
